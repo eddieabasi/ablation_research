@@ -10,6 +10,16 @@ that does not itself come from ablation.
 
 See [`docs/SCOPE.md`](docs/SCOPE.md) for the testbed, design decisions and full question list.
 
+## Findings so far
+
+**Q1** ([report](results/q1/REPORT.md), 5 seeds): mean, resample and optimal ablation agree on
+which heads matter (Spearman ρ 0.87–0.95) and recover the known circuit (AUROC 0.90–0.98).
+Zero ablation ranks heads *worse than chance* (AUROC 0.25): it rates idle heads with large
+constant outputs above real induction heads, and how far it diverges from mean ablation
+is predicted by how constant a head's output is (ρ = 0.90). Methods that agree on rankings
+still disagree on effect sizes by ~40× (resample vs optimal, previous-token heads), and
+no method flags any single induction head, because 8 of them back each other up.
+
 ## Questions
 
 | # | Question | Status |

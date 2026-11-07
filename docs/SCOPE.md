@@ -58,6 +58,9 @@ in the README.
 * **Experiment**: decompose zero effect = (zero → mean shift) + (mean ablation effect);
   regress on mean-output norm; repeat with LayerNorm frozen at clean statistics to test
   the mediation claim.
+* **Leads from Q1**: across 80 heads, log(zero/mean effect) vs the head's constant
+  fraction gives ρ = 0.90. Also unexplained: mean-ablating all of layer 0 is *worse*
+  than zero-ablating it (5/5 seeds).
 
 ### Q3. Self-repair: when a circuit head is ablated, do other components compensate?
 
@@ -74,6 +77,8 @@ in the README.
   Interaction `effect(A ∪ B) − effect(A) − effect(B)` is strongly positive for backup pairs.
 * **Experiment**: pairwise joint ablations within the circuit; vary the number of heads to
   control redundancy.
+* **Leads from Q1**: no single induction head passes a 1%-of-circuit threshold under any
+  method, in any seed, while the 8 together account for the whole effect.
 
 ### Q5. How well does attribution patching (a linear approximation) predict real ablation effects?
 
