@@ -24,6 +24,7 @@ from ablation.stats import auroc, spearman, top_k_overlap
 COLORS = {"zero": "#2a78d6", "mean": "#eb6834", "resample": "#1baf7a", "optimal": "#eda100"}
 MARKERS = {"zero": "o", "mean": "s", "resample": "D", "optimal": "^"}
 SURFACE, INK, INK2, GRID = "#fcfcfb", "#0b0b0b", "#52514e", "#e4e3df"
+THRESHOLD_FRAC = 0.01
 
 
 def load(dirpath: Path) -> list[dict]:
@@ -64,6 +65,10 @@ def analyze(runs: list[dict]) -> dict:
         m: {"prev-token (L0)": [], "induction (L1)": []} for m in METHODS if m != "mean"
     }
     zero_fp_singles = []
+    # Threshold rule a practitioner might use: a head "matters" if its single-head effect
+    # exceeds 1% of the same method's whole-circuit joint effect.
+    thr_fp: dict[str, list[int]] = {m: [] for m in METHODS}
+    thr_fn: dict[str, list[int]] = {m: [] for m in METHODS}
     for run in runs:
         heads, labels, eff, _ = head_table(run)
         k = int(labels.sum())
@@ -76,6 +81,9 @@ def analyze(runs: list[dict]) -> dict:
             prec[m].append(top_k_overlap(eff[m], truth + 1e-9 * np.arange(len(truth)), k))
             g = run["groups"]
             nc_over_c[m].append(g["non_circuit"][m]["mean"] / g["circuit"][m]["mean"])
+            tau = THRESHOLD_FRAC * g["circuit"][m]["mean"]
+            thr_fp[m].append(int((eff[m][~labels] > tau).sum()))
+            thr_fn[m].append(int((eff[m][labels] <= tau).sum()))
         kinds = [head_kind(h, c) for h, c in zip(heads, labels)]
         for m in ratio_to_mean:
             for kind in ratio_to_mean[m]:
@@ -94,6 +102,13 @@ def analyze(runs: list[dict]) -> dict:
         m: {kind: {"mean": float(np.mean(v)), "per_seed": v} for kind, v in d.items() if v} for m, d in ratio_to_mean.items()
     }
     out["zero_noncircuit_above_weakest_circuit_head"] = zero_fp_singles
+    out["threshold_rule"] = {
+        "frac_of_circuit_effect": THRESHOLD_FRAC,
+        "false_positives": thr_fp,
+        "false_negatives": thr_fn,
+        "n_circuit": [len(r["reference_circuit"]) for r in runs],
+        "n_heads": [len(r["single"]["zero"]) for r in runs],
+    }
     out["groups"] = {
         name: {m: [r["groups"][name][m]["mean"] for r in runs if name in r["groups"]] for m in METHODS}
         for name in ("circuit", "non_circuit", "prev_token_heads", "induction_heads", "layer0", "layer1")
@@ -125,6 +140,15 @@ def write_markdown(runs: list[dict], s: dict, path: Path) -> None:
     L.append("|---|---|---|")
     for m in METHODS:
         L.append(f"| {m} | {fmt(s['auroc_vs_reference'][m]['per_seed'])} | {fmt(s['precision_at_k'][m]['per_seed'])} |")
+    tr = s["threshold_rule"]
+    L.append(f"\n## Threshold rule: a head \"matters\" if its effect > {tr['frac_of_circuit_effect']:.0%} of that method's whole-circuit effect\n")
+    L.append(f"Totals over all seeds ({sum(tr['n_circuit'])} circuit heads, "
+             f"{sum(tr['n_heads']) - sum(tr['n_circuit'])} non-circuit heads).\n")
+    L.append("| method | false positives (non-circuit flagged) | false negatives (circuit missed) |")
+    L.append("|---|---|---|")
+    for m in METHODS:
+        L.append(f"| {m} | {sum(tr['false_positives'][m])} (per seed {tr['false_positives'][m]}) | "
+                 f"{sum(tr['false_negatives'][m])} (per seed {tr['false_negatives'][m]}) |")
     L.append("\n## Joint ablation of head groups (mean over seeds; min–max in brackets)\n")
     L.append("| group | " + " | ".join(METHODS) + " |")
     L.append("|---|" + "---|" * len(METHODS))
