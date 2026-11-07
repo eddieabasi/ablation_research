@@ -109,11 +109,56 @@ def analyze(runs: list[dict]) -> dict:
         "n_circuit": [len(r["reference_circuit"]) for r in runs],
         "n_heads": [len(r["single"]["zero"]) for r in runs],
     }
+    out["drivers"] = drivers(runs)
+    out["optimal_minus_mean_worst"] = {
+        "single": max(r["single"]["optimal"][h]["mean"] - r["single"]["mean"][h]["mean"] for r in runs for h in r["single"]["mean"]),
+        "group": max(d["optimal"]["mean"] - d["mean"]["mean"] for r in runs for d in r["groups"].values()),
+    }
     out["groups"] = {
         name: {m: [r["groups"][name][m]["mean"] for r in runs if name in r["groups"]] for m in METHODS}
         for name in ("circuit", "non_circuit", "prev_token_heads", "induction_heads", "layer0", "layer1")
     }
     return out
+
+
+def drivers(runs: list[dict]) -> dict:
+    """What predicts each method's effect? Pooled over seeds.
+
+    * constant fraction of a head's output, c = |mean| / (|mean| + mean |deviation|):
+      zero ablation removes the constant part as well as the information, so the
+      zero/mean ratio should grow with c.
+    * previous-token score of non-circuit layer-0 heads: the weak previous-token
+      signal they carry is what resampling replaces with wrong information.
+    """
+    c, log_ratio, nc_prev, nc_res, nc_mean, nc_zero, nc_c = [], [], [], [], [], [], []
+    for r in runs:
+        heads, labels, eff, _ = head_table(r)
+        mn = np.array(r["head_stats"]["mean_norm"]).ravel()
+        dv = np.array(r["head_stats"]["dev_norm"]).ravel()
+        cf = mn / (mn + dv)
+        prev = np.array(r["head_scores"]["prev_token"]).ravel()
+        for i, h in enumerate(heads):
+            c.append(cf[i])
+            log_ratio.append(np.log10(max(eff["zero"][i], 1e-6) / max(eff["mean"][i], 1e-6)))
+            if not labels[i] and h.startswith("0."):
+                nc_prev.append(prev[i]); nc_res.append(eff["resample"][i]); nc_mean.append(eff["mean"][i])
+                nc_zero.append(eff["zero"][i]); nc_c.append(cf[i])
+    c = np.array(c)
+    return {
+        "n_heads": len(c),
+        "constant_fraction": {
+            "noncircuit_L0_median": float(np.median(nc_c)),
+            "all_median": float(np.median(c)),
+        },
+        "rho_log_zero_over_mean_vs_constant_fraction": spearman(c, log_ratio),
+        "noncircuit_L0": {
+            "n": len(nc_prev),
+            "rho_resample_vs_prev_token_score": spearman(nc_prev, nc_res),
+            "rho_mean_vs_prev_token_score": spearman(nc_prev, nc_mean),
+            "rho_zero_vs_constant_fraction": spearman(nc_c, nc_zero),
+            "rho_zero_vs_prev_token_score": spearman(nc_prev, nc_zero),
+        },
+    }
 
 
 def write_markdown(runs: list[dict], s: dict, path: Path) -> None:
@@ -163,6 +208,22 @@ def write_markdown(runs: list[dict], s: dict, path: Path) -> None:
     L.append("|---|---|")
     for m in METHODS:
         L.append(f"| {m} | {fmt(s['noncircuit_over_circuit_joint'][m]['per_seed'], 3)} |")
+    d = s["drivers"]
+    L.append("\n## What drives each method's effect (Spearman ρ, pooled over seeds)\n")
+    L.append("Constant fraction of a head = |mean output| / (|mean output| + mean |deviation from it|).\n")
+    L.append("| relation | ρ | n |")
+    L.append("|---|---|---|")
+    L.append(f"| log(zero / mean effect) vs constant fraction, all heads | {d['rho_log_zero_over_mean_vs_constant_fraction']:.2f} | {d['n_heads']} |")
+    nc = d["noncircuit_L0"]
+    L.append(f"| non-circuit L0 heads: resample effect vs previous-token score | {nc['rho_resample_vs_prev_token_score']:.2f} | {nc['n']} |")
+    L.append(f"| non-circuit L0 heads: mean effect vs previous-token score | {nc['rho_mean_vs_prev_token_score']:.2f} | {nc['n']} |")
+    L.append(f"| non-circuit L0 heads: zero effect vs constant fraction | {nc['rho_zero_vs_constant_fraction']:.2f} | {nc['n']} |")
+    L.append(f"| non-circuit L0 heads: zero effect vs previous-token score | {nc['rho_zero_vs_prev_token_score']:.2f} | {nc['n']} |")
+    cf = d["constant_fraction"]
+    L.append(f"\nMedian constant fraction: non-circuit L0 heads {cf['noncircuit_L0_median']:.2f}, all heads {cf['all_median']:.2f}.\n")
+    w = s["optimal_minus_mean_worst"]
+    L.append(f"Optimal-ablation fitting noise: the fitted constant should never do worse than the mean; worst observed "
+             f"excess is {w['single']:+.4f} nats (single heads) and {w['group']:+.4f} nats (groups).\n")
     L.append("\n## Effect size relative to mean ablation (median over circuit heads of that kind; mean ± sd over seeds)\n")
     L.append("| method | prev-token heads | induction heads |")
     L.append("|---|---|---|")
@@ -242,8 +303,8 @@ def plot_groups(s: dict, path: Path) -> None:
     ax.set_yscale("log")
     ax.set_xticks(range(len(groups)), [lbl for _, lbl in groups], color=INK)
     ax.set_ylabel("loss increase from joint ablation (nats, log)", color=INK2, fontsize=9)
-    ax.set_title("Joint ablation of head groups (bar = mean, dots = seeds)", color=INK, fontsize=11, loc="left")
-    leg = ax.legend(title="ablation method", frameon=False, fontsize=9, title_fontsize=9, loc="upper left", ncols=4)
+    ax.set_title("Joint ablation of head groups (bar = mean, dots = seeds)", color=INK, fontsize=11, loc="left", pad=30)
+    leg = ax.legend(frameon=False, fontsize=9, loc="lower left", bbox_to_anchor=(0, 1.0), ncols=4, handlelength=1.2)
     plt.setp(leg.get_texts(), color=INK)
     fig.tight_layout()
     fig.savefig(path, facecolor=SURFACE)
