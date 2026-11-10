@@ -53,11 +53,16 @@ in the README.
 
 ### Q2. How much of a zero-ablation effect is the mean shift rather than information?
 
-* **Hypothesis**: `zero − mean` is predicted by the norm of the head's mean output
-  relative to the residual stream, and is mediated by LayerNorm rescaling.
-* **Experiment**: decompose zero effect = (zero → mean shift) + (mean ablation effect);
-  regress on mean-output norm; repeat with LayerNorm frozen at clean statistics to test
-  the mediation claim.
+* **Hypothesis** (as first written): `zero − mean` is predicted by the norm of the head's
+  mean output relative to the residual stream, and is mediated by LayerNorm rescaling.
+* **Experiment** (as run, `experiments/q2_mean_shift.py`): a 2×2 design on each head's
+  output r = μ + ε: `mean` (r → μ, removes information), `shift` (r → ε, removes the
+  constant), `zero` (r → 0, removes both); interaction = zero − mean − shift. Each is
+  repeated with every LayerNorm frozen at its clean scale, and, for layer-0 heads,
+  path-specifically (the change delivered only to layer-1 queries, keys, values, or the
+  unembedding). Predictors: mean-output norm vs how far the mean output moves the
+  layer-1 queries/keys/values. Diagnostics: induction heads' attention on the answer key,
+  output entropy, LayerNorm scale.
 * **Leads from Q1**: across 80 heads, log(zero/mean effect) vs the head's constant
   fraction gives ρ = 0.90. Also unexplained: mean-ablating all of layer 0 is *worse*
   than zero-ablating it (5/5 seeds).

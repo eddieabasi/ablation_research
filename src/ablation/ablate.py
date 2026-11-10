@@ -7,12 +7,26 @@ exactly that head's additive contribution to the residual stream) with something
 * ``mean``      the head's mean output at that position over a reference set of inputs
 * ``resample``  the head's output on a *different* input drawn from the same distribution
                 (each evaluation sequence is paired with one reference sequence)
+* ``shift``     the head's output minus its mean: keeps the input-dependent information
+                and removes only the constant part (used in Q2 to split ``zero`` into
+                "remove information" (= ``mean``) and "remove the constant" (= ``shift``))
 * ``optimal``   the constant (per position) that minimises expected loss, fitted by
                 gradient descent on held-out training samples, starting from the mean
                 (Li & Janson, 2024, "Optimal ablation for interpretability")
 
 The *effect* of an ablation is the per-sequence increase in task loss:
 ``loss(ablated) - loss(clean)``.
+
+Two variants (``ablation_effect`` keyword arguments):
+
+* ``freeze_ln=True``: every LayerNorm uses the scale it had in the clean run, so the
+  ablation can change the residual stream's direction but cannot rescale it.
+* ``receivers=...``: path-specific ablation. The ablated heads' change in output is
+  delivered only to the chosen receivers, everything else sees the clean value.
+  Receivers are ``"q"``, ``"k"``, ``"v"`` (the query/key/value inputs of every later
+  layer) and ``"direct"`` (the final residual stream, i.e. straight to the unembedding).
+  Only the direct path from the heads to each receiver is changed. In a 2-layer model,
+  ablating layer-0 heads with all four receivers is exactly the full ablation.
 
 What each method removes, for intuition:
 
@@ -31,6 +45,7 @@ from __future__ import annotations
 
 from collections import defaultdict
 from dataclasses import dataclass, field
+from functools import cached_property
 from typing import Callable, Iterable
 
 import torch
@@ -77,6 +92,18 @@ class AblationContext:
         self.mean_result = {l: ref[result_hook_name(l)].mean(0) for l in range(L)}
         self.resample_result = {l: res[result_hook_name(l)] for l in range(L)}
 
+    @cached_property
+    def clean_result(self) -> dict[int, torch.Tensor]:
+        """Per-head outputs on the evaluation batch, layer -> [b, pos, head, d]."""
+        names = [result_hook_name(l) for l in range(self.model.cfg.n_layers)]
+        _, c = self.model.run_with_cache(self.eval_batch.tokens, names=names)
+        return {l: c[result_hook_name(l)] for l in range(self.model.cfg.n_layers)}
+
+    @cached_property
+    def clean_ln_scales(self) -> dict[str, torch.Tensor]:
+        _, c = self.model.run_with_cache(self.eval_batch.tokens, names=self.model.ln_scale_names())
+        return c
+
     @property
     def all_heads(self) -> list[Head]:
         cfg = self.model.cfg
@@ -117,6 +144,9 @@ def ablation_hooks(
                 raise ValueError("optimal ablation needs fitted constants")
             c = constants[layer]
             repl = lambda x, c=c: c.expand(x.shape[0], *c.shape)
+        elif method == "shift":
+            m = ctx.mean_result[layer][:, idx]
+            repl = lambda x, idx=idx, m=m: x[:, :, idx] - m
         else:
             raise ValueError(f"unknown method {method!r}")
 
@@ -127,6 +157,50 @@ def ablation_hooks(
 
         hooks[result_hook_name(layer)] = fn
     return hooks
+
+
+RECEIVERS = ("q", "k", "v", "direct")
+
+
+def path_hooks(
+    ctx: AblationContext,
+    heads: Iterable[Head],
+    method: str,
+    receivers: Iterable[str],
+    constants: dict[int, torch.Tensor] | None = None,
+) -> Hooks:
+    """Deliver the ablated heads' change in output only to ``receivers``.
+
+    All heads must be in the same layer. The change ``delta = replacement - clean`` (summed
+    over the heads) is added to the q/k/v inputs of every later layer and/or the final
+    residual stream; the heads' own output and every other path stay clean.
+    """
+    heads = list(heads)
+    layers = {l for l, _ in heads}
+    if len(layers) != 1:
+        raise ValueError("path-specific ablation needs all heads in one layer")
+    (layer,) = layers
+    receivers = set(receivers)
+    if not receivers <= set(RECEIVERS):
+        raise ValueError(f"receivers must be a subset of {RECEIVERS}")
+    clean = ctx.clean_result[layer]
+    full = ablation_hooks(ctx, heads, method, constants)[result_hook_name(layer)]
+    with torch.no_grad():
+        delta = (full(clean) - clean).sum(dim=2)  # [b, pos, d]
+    add = lambda r: r + delta[: r.shape[0]]
+    hooks: Hooks = {}
+    for m in range(layer + 1, ctx.model.cfg.n_layers):
+        for c in "qkv":
+            if c in receivers:
+                hooks[f"blocks.{m}.attn.{c}_in"] = add
+    if "direct" in receivers:
+        hooks["resid_final"] = add
+    return hooks
+
+
+def frozen_ln_hooks(ctx: AblationContext) -> Hooks:
+    """Replace every LayerNorm scale with its value in the clean run on ``ctx.eval_batch``."""
+    return {name: (lambda s, v=v: v[: s.shape[0]]) for name, v in ctx.clean_ln_scales.items()}
 
 
 def fit_optimal_constants(
@@ -161,18 +235,38 @@ def fit_optimal_constants(
     return {l: p.detach() for l, p in params.items()}
 
 
+def effect_hooks(
+    ctx: AblationContext,
+    heads: Iterable[Head],
+    method: str,
+    constants: dict[int, torch.Tensor] | None = None,
+    freeze_ln: bool = False,
+    receivers: Iterable[str] | None = None,
+) -> Hooks:
+    """All hooks for one ablation (see ``ablation_effect``)."""
+    heads = list(heads)
+    if method == "optimal" and constants is None:
+        with torch.enable_grad():
+            constants = fit_optimal_constants(ctx, heads)
+    if receivers is None:
+        hooks = ablation_hooks(ctx, heads, method, constants)
+    else:
+        hooks = path_hooks(ctx, heads, method, receivers, constants)
+    if freeze_ln:
+        hooks.update(frozen_ln_hooks(ctx))
+    return hooks
+
+
 @torch.no_grad()
 def ablation_effect(
     ctx: AblationContext,
     heads: Iterable[Head],
     method: str,
     constants: dict[int, torch.Tensor] | None = None,
+    freeze_ln: bool = False,
+    receivers: Iterable[str] | None = None,
 ) -> torch.Tensor:
     """Per-sequence loss increase on ``ctx.eval_batch`` from ablating ``heads`` jointly."""
-    heads = list(heads)
-    if method == "optimal" and constants is None:
-        with torch.enable_grad():
-            constants = fit_optimal_constants(ctx, heads)
-    hooks = ablation_hooks(ctx, heads, method, constants)
+    hooks = effect_hooks(ctx, heads, method, constants, freeze_ln, receivers)
     logits = ctx.model(ctx.eval_batch.tokens, hooks=hooks)
     return T.per_seq_loss(logits, ctx.eval_batch) - ctx.clean_loss

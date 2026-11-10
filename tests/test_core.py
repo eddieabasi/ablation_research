@@ -198,3 +198,83 @@ def test_cache_names_limits_cache():
     b = T.InductionTask().sample(2, torch.Generator().manual_seed(0))
     _, cache = m.run_with_cache(b.tokens, names=["blocks.0.attn.result"])
     assert set(cache) == {"blocks.0.attn.result"}
+
+
+# --- Q2: shift, frozen LayerNorm, path-specific ablation ------------------------------
+
+
+def _ctx(m, n=32, seed=0):
+    g = torch.Generator().manual_seed(seed)
+    task = T.InductionTask()
+    return make_ctx(m, task.sample(n, g), task.sample(2 * n, g), task.sample(n, g))
+
+
+def test_layernorm_matches_torch():
+    m = tiny_model()
+    x = torch.randn(3, 5, 32)
+    ref = torch.nn.functional.layer_norm(x, (32,), m.ln_final.weight, m.ln_final.bias)
+    assert torch.allclose(m.ln_final(x), ref, atol=1e-5)
+
+
+def test_ln_scale_hooks_are_cached():
+    m = tiny_model()
+    b = T.InductionTask().sample(2, torch.Generator().manual_seed(0))
+    _, cache = m.run_with_cache(b.tokens, names=m.ln_scale_names())
+    assert set(cache) == set(m.ln_scale_names())
+    assert cache["ln_final.scale"].shape == (2, b.tokens.shape[1], 1)
+
+
+def test_shift_equals_zero_when_reference_is_the_input():
+    m = tiny_model()
+    one = T.InductionTask().sample(1, torch.Generator().manual_seed(0))
+    same = one[torch.zeros(6, dtype=torch.long)]
+    ctx = make_ctx(m, same, same, same)
+    z = ablation_effect(ctx, [(0, 1)], "zero")
+    s = ablation_effect(ctx, [(0, 1)], "shift")
+    assert torch.allclose(z, s, atol=1e-5)
+
+
+def test_frozen_ln_without_ablation_is_noop():
+    from ablation.ablate import frozen_ln_hooks
+
+    m = tiny_model()
+    ctx = _ctx(m)
+    with torch.no_grad():
+        logits = m(ctx.eval_batch.tokens, hooks=frozen_ln_hooks(ctx))
+    loss = T.per_seq_loss(logits, ctx.eval_batch)
+    assert torch.allclose(loss, ctx.clean_loss, atol=1e-5)
+
+
+def test_frozen_ln_changes_zero_ablation_effect():
+    m = tiny_model()
+    ctx = _ctx(m)
+    live = ablation_effect(ctx, [(0, 0), (0, 1)], "zero")
+    frozen = ablation_effect(ctx, [(0, 0), (0, 1)], "zero", freeze_ln=True)
+    assert not torch.allclose(live, frozen, atol=1e-4)
+
+
+def test_path_ablation_with_all_receivers_equals_full_ablation():
+    from ablation.ablate import RECEIVERS
+
+    m = tiny_model()
+    ctx = _ctx(m)
+    heads = [(0, 0), (0, 2)]
+    for method in ("zero", "mean", "shift", "resample"):
+        full = ablation_effect(ctx, heads, method)
+        path = ablation_effect(ctx, heads, method, receivers=RECEIVERS)
+        assert torch.allclose(full, path, atol=1e-5), method
+
+
+def test_path_ablation_with_no_receivers_is_noop():
+    m = tiny_model()
+    ctx = _ctx(m)
+    eff = ablation_effect(ctx, [(0, 3)], "zero", receivers=[])
+    assert eff.abs().max() < 1e-6
+
+
+def test_layer1_head_direct_path_equals_full_ablation():
+    m = tiny_model()
+    ctx = _ctx(m)
+    full = ablation_effect(ctx, [(1, 2)], "mean")
+    path = ablation_effect(ctx, [(1, 2)], "mean", receivers=["direct"])
+    assert torch.allclose(full, path, atol=1e-5)
