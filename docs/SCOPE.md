@@ -71,6 +71,8 @@ in the README.
 
 * **Hypothesis**: Total effect < direct effect for heads with backups; compensation is
   larger under mean than resample ablation.
+* **Leads from Q2**: freezing LayerNorm makes 95–100% of single-head ablations worse
+  (1.2–4×), so LayerNorm rescaling is one compensation mechanism to quantify.
 * **Experiment**: compare total effect (ablate, let everything recompute) with direct
   effect (patch only the head→logits path). Needs ≥3 layers to have room for repair;
   also measure on the redundant 8-induction-head model.
@@ -84,6 +86,10 @@ in the README.
   control redundancy.
 * **Leads from Q1**: no single induction head passes a 1%-of-circuit threshold under any
   method, in any seed, while the 8 together account for the whole effect.
+* **Leads from Q2**: ablation effects are superadditive near the clean model (removing a
+  head's constant and its information together costs ~3× the sum for idle heads) and
+  subadditive far from it. Q4's pairwise interactions should test whether this is a
+  general saturation effect.
 
 ### Q5. How well does attribution patching (a linear approximation) predict real ablation effects?
 

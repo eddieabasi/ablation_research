@@ -82,7 +82,8 @@ def summarize(runs: list[dict]) -> dict:
     # 2. LayerNorm: frozen / live per method
     ln: dict = {}
     for g in GROUPS:
-        ln[g] = {m: [eff(r["units"][g], f"{m}_frozen_ln") / max(eff(r["units"][g], m), 1e-6) for r in runs if g in r["units"]]
+        ln[g] = {m: [eff(r["units"][g], f"{m}_frozen_ln") / eff(r["units"][g], m) if eff(r["units"][g], m) > 1e-3 else float("nan")
+                     for r in runs if g in r["units"]]
                  for m in METHODS}
     ln_single: dict = {k: {m: [] for m in METHODS} for k in dec_single}
     for r in runs:
@@ -155,13 +156,14 @@ def fmt(xs, d=2) -> str:
     return f"{xs.mean():.{d}f} ± {xs.std(ddof=1):.{d}f}" if len(xs) > 1 else f"{xs.mean():.{d}f}"
 
 
-def med(xs, d=3) -> str:
+def med(xs, d=3, show_n=False) -> str:
     xs = np.asarray(xs, dtype=float)
     xs = xs[np.isfinite(xs)]
     if len(xs) == 0:
         return "–"
     lo, hi = np.quantile(xs, [0.25, 0.75])
-    return f"{np.median(xs):.{d}f} [{lo:.{d}f}, {hi:.{d}f}]"
+    n = f" (n={len(xs)})" if show_n else ""
+    return f"{np.median(xs):.{d}f} [{lo:.{d}f}, {hi:.{d}f}]{n}"
 
 
 def write_markdown(runs: list[dict], s: dict, path: Path) -> None:
@@ -185,14 +187,15 @@ def write_markdown(runs: list[dict], s: dict, path: Path) -> None:
         L.append(f"| {k} | {len(d['zero'])} | {med(d['zero'], 4)} | {med(d['mean'], 4)} | {med(d['shift'], 4)} | {med(d['interaction'], 4)} | {med(d['constant_share'], 2)} |")
 
     L.append("\n## 2. Does LayerNorm mediate it? (effect with LayerNorm frozen at clean scale ÷ live effect)\n")
-    L.append("Ratio > 1: freezing LayerNorm makes the ablation *worse*, i.e. live LayerNorm was cushioning it.\n")
+    L.append("Ratio > 1: freezing LayerNorm makes the ablation *worse*, i.e. live LayerNorm was cushioning it. "
+             "Only ablations with a live effect above 0.001 nats are included (ratios of near-zero effects are noise).\n")
     L.append("| unit | zero | mean | shift |")
     L.append("|---|---|---|---|")
     for g, lbl in GROUPS.items():
         d = s["ln_frozen_over_live_groups"][g]
         L.append(f"| {lbl} (group) | {fmt(d['zero'])} | {fmt(d['mean'])} | {fmt(d['shift'])} |")
     for k, d in s["ln_frozen_over_live_single"].items():
-        L.append(f"| {k} (single, median [IQR]) | {med(d['zero'], 2)} | {med(d['mean'], 2)} | {med(d['shift'], 2)} |")
+        L.append(f"| {k} (single, median [IQR]) | {med(d['zero'], 2, True)} | {med(d['mean'], 2, True)} | {med(d['shift'], 2, True)} |")
     fr = s["ln_frozen_gt_live_fraction"]
     L.append(f"\nFraction of single-head ablations (effect > 0.001) made worse by freezing LayerNorm: "
              f"zero {fr['zero']:.0%}, mean {fr['mean']:.0%}, shift {fr['shift']:.0%}.\n")
