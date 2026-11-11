@@ -24,8 +24,10 @@ no method flags any single induction head, because 8 of them back each other up.
 off-distribution mean shift". Removing a head's constant alone explains only 31% (idle heads)
 or 4% (previous-token heads) of zero ablation's excess over mean ablation; the rest appears
 only when constant and information are removed together (superadditive in 5/5 seeds).
-LayerNorm doesn't cause the excess. It *cushions* single-head ablations (freezing it makes 95%
-of them worse) and amplifies only when nearly all signal is gone, which explains why
+The compounding is inside the network (the logit margins compound; loss curvature explains
+only 13–19%). LayerNorm doesn't cause the excess: the first LayerNorm downstream of an
+ablated head *cushions* it (freezing LayerNorm makes 95% of single-head ablations worse), and
+the final LayerNorm amplifies when nearly all signal is gone, which alone explains why
 mean-ablating all of layer 0 hurts more than zero-ablating it. Path patching confirms
 previous-token information reaches induction heads only through their keys.
 

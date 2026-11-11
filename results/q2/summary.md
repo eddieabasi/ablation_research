@@ -96,3 +96,31 @@ Induction attention = layer-1 attention mass on the key holding the answer, aver
 | non-circuit | 31 | zero_minus_mean | 0.59 | 0.73 | 0.62 | 0.44 |
 | all-layer0 | 40 | shift | 0.65 | 0.64 | 0.64 | 0.53 |
 | all-layer0 | 40 | zero_minus_mean | 0.76 | 0.50 | 0.81 | 0.51 |
+
+## 6. Follow-up: which LayerNorm? (5 seeds)
+
+Effect with only one LayerNorm frozen ÷ live effect (> 1: that LayerNorm was cushioning; < 1: it was amplifying). Only live effects above 0.001 nats. `attn` = the LayerNorms in front of attention (for layer-0 ablations, the layer-1 ones); `final` = the final LayerNorm.
+
+| unit | zero: attn | zero: final | mean: attn | mean: final | shift: attn | shift: final |
+|---|---|---|---|---|---|---|
+| non-circuit heads (group) | 1.26 ± 0.16 | 1.05 ± 0.07 | 4.76 ± 1.75 | 1.13 ± 0.10 | 1.04 ± 0.17 | 1.13 ± 0.07 |
+| prev-token heads (group) | 1.32 ± 0.32 | 0.89 ± 0.04 | 1.85 ± 0.57 | 0.88 ± 0.06 | 1.51 ± 0.37 | 1.31 ± 0.18 |
+| induction heads (group) | 1.00 ± 0.00 | 0.79 ± 0.01 | 1.00 ± 0.00 | 0.79 ± 0.01 | – | – |
+| all of layer 0 (group) | 1.04 ± 0.04 | 0.94 ± 0.04 | 1.06 ± 0.03 | 0.78 ± 0.01 | 1.05 ± 0.15 | 1.06 ± 0.07 |
+| prev-token (single, median) | 2.23 [1.80, 2.56] (n=9) | 0.96 [0.94, 0.98] (n=9) | 4.06 [3.28, 5.17] (n=9) | 1.00 [0.97, 1.06] (n=9) | 1.63 [1.40, 2.04] (n=9) | 1.33 [1.24, 1.36] (n=9) |
+| induction (single, median) | 1.00 [1.00, 1.00] (n=26) | 3.36 [2.98, 3.74] (n=26) | 1.00 [1.00, 1.00] (n=26) | 3.40 [3.01, 3.78] (n=26) | – | – |
+| non-circuit (single, median) | 1.26 [1.01, 1.69] (n=31) | 1.20 [1.14, 1.26] (n=31) | 5.18 [5.18, 5.18] (n=1) | 1.07 [1.07, 1.07] (n=1) | 1.07 [0.89, 1.37] (n=30) | 1.23 [1.15, 1.26] (n=30) |
+
+## 7. Follow-up: is the interaction just loss curvature? (margin test, 5 seeds)
+
+Margin m = target logit − logsumexp(other logits); loss = softplus(−m). Clean median margin 7.48 ± 0.06 nats. A = mean ablation, B = shift, AB = zero. Margin interaction = drop(AB) − drop(A) − drop(B) (> 0: superadditive inside the network). Explained = share of the loss interaction that loss curvature alone would produce if margin drops added exactly.
+
+| unit | loss interaction | margin drop A (mean) | B (shift) | AB (zero) | margin interaction | explained by curvature |
+|---|---|---|---|---|---|---|
+| non-circuit heads (group) | 0.47 ± 0.30 | 0.42 ± 0.31 | 3.32 ± 0.41 | 4.89 ± 1.14 | 1.15 ± 0.51 | 0.19 ± 0.07 |
+| prev-token heads (group) | 0.81 ± 0.32 | 7.60 ± 4.34 | 1.05 ± 0.62 | 9.17 ± 3.87 | 0.53 ± 1.11 | 1.00 ± 1.13 |
+| induction heads (group) | 0.00 ± 0.04 | 12.70 ± 0.10 | 0.03 ± 0.01 | 12.71 ± 0.12 | -0.03 ± 0.05 | -2.15 ± 7.34 |
+| all of layer 0 (group) | -1.04 ± 0.26 | 13.84 ± 0.15 | 4.59 ± 0.45 | 13.50 ± 0.24 | -4.92 ± 0.43 | -3.84 ± 0.78 |
+| prev-token (single, median) | 0.2455 [0.1677, 0.4915] | 1.33 [0.90, 2.71] | 0.48 [0.45, 0.64] | 2.60 [1.93, 4.45] | 0.77 [0.56, 1.16] (100% > 0) | 0.16 [0.16, 0.25] |
+| induction (single, median) | 0.0000 [0.0000, 0.0001] | 0.50 [0.36, 0.66] | 0.01 [0.00, 0.01] | 0.51 [0.37, 0.66] | 0.00 [0.00, 0.00] (82% > 0) | 0.54 [0.43, 0.65] |
+| non-circuit (single, median) | 0.0008 [0.0002, 0.0019] | 0.03 [0.02, 0.04] | 0.40 [0.32, 0.53] | 0.44 [0.39, 0.58] | 0.02 [0.01, 0.04] (100% > 0) | 0.13 [-0.17, 0.28] |

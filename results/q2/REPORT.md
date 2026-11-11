@@ -11,10 +11,15 @@ How much of a zero-ablation effect is each, and what carries the damage?
   for only 31% of zero ablation's excess over mean ablation; for previous-token heads, 4%.
   Most of the excess appears only when the constant and the information are removed
   *together* (positive interaction in 5/5 seeds; 39 of 40 single layer-0 heads).
+* **The compounding happens inside the network, not just in the loss.** The target-logit
+  margins themselves compound (31 of 31 idle heads, 9 of 9 previous-token heads). The
+  curvature of the loss explains only 13–19% of the loss interaction.
 * **LayerNorm is not the culprit.** It cushions single-head ablations: freezing it at its
-  clean scale makes 95% of zero ablations and 100% of mean ablations *worse*. It amplifies
-  only when an ablation removes almost all the useful signal, which explains the Q1 puzzle
-  of mean ablation beating zero on all of layer 0.
+  clean scale makes 95% of zero ablations and 100% of mean ablations *worse*. The layer-1
+  LayerNorm does the cushioning for layer-0 heads, the final LayerNorm for layer-1 heads.
+  The final LayerNorm also *amplifies* when an ablation removes almost all the useful
+  signal, and that alone explains the Q1 puzzle of mean ablation beating zero on all of
+  layer 0.
 * **The damage has specific routes.** The idle heads' constant acts through layer-1
   queries (with keys). The previous-token heads' information acts entirely through layer-1
   keys, the textbook induction mechanism, confirmed causally here.
@@ -35,13 +40,20 @@ Interaction = zero − mean − shift. The Shapley share of the constant (its av
 contribution over the two orders) is ½[shift + (zero − mean)] / zero.
 
 Each ablation is also run (a) with **every LayerNorm frozen** at its clean-run scale, so the
-ablation can change the residual stream's direction but not its norm, and (b) for layer-0
+ablation can change the residual stream's direction but not its norm, and separately with
+only the layer-1 or only the final LayerNorm frozen, and (b) for layer-0
 heads, **path-specifically**: the change reaches only the layer-1 queries, keys, values, or
 the unembedding directly. In a 2-layer model, all four paths together reproduce the full
 ablation exactly (tested in `tests/test_core.py`).
 
+A follow-up (`experiments/q2_followup.py`) adds the single-LayerNorm freezes and a
+**margin test**. Loss is exactly softplus(−m) of the target-logit margin
+m = z_target − logsumexp(other logits), a fixed convex function. If the margin drops of
+mean and shift added up to zero's, the loss interaction would come purely from that
+curvature.
+
 The zero and mean numbers reproduce Q1 exactly (same evaluation sequences). Full tables:
-[`summary.md`](summary.md); per-seed data in `seed*.json`.
+[`summary.md`](summary.md); per-seed data in `seed*.json` and `followup_seed*.json`.
 
 ## Findings
 
@@ -76,15 +88,28 @@ So "how much is the mean shift" has an order-dependent answer:
 * **All of layer 0.** The interaction turns *negative*: the loss is already near its
   ceiling, so the second removal adds less.
 
-**Why superadditive? A working explanation.** The clean model is saturated (loss about
-0.001; 88% of induction-head attention on the answer key). One small perturbation is
-absorbed by that margin; two together exhaust it. The diagnostics fit this. For the idle
-heads, the drops in answer-key attention roughly add up: 0.09 (mean) + 0.17 (shift) =
-0.26, against 0.31 observed for zero. The *loss* does not add up (0.24 vs 0.71), because
-loss is a steeply convex function of that attention near saturation. Far from the clean
-point (all of layer 0) the curve flattens and the interaction flips sign. We have not
-tested this explanation directly; Q4 measures interactions between heads and is the
-natural place to check it.
+**Is it just the loss curvature? Mostly not.** An earlier version of this report proposed
+that the superadditivity came from saturation: the clean model is very confident (median
+target-logit margin 7.5 nats, i.e. about 99.94% on the right token), and loss is steeply
+convex in the margin. The margin test checks this directly (mean ± sd over seeds;
+single heads: median):
+
+| ablated | margin drop: mean (info) | shift (constant) | zero (both) | margin interaction | share of loss interaction explained by curvature |
+|---|---|---|---|---|---|
+| all idle heads | 0.42 | 3.32 | 4.89 | **+1.15 ± 0.51** (5/5 seeds > 0) | 19% ± 7% |
+| previous-token heads | 7.60 | 1.05 | 9.17 | +0.53 ± 1.11 (3/5 seeds > 0) | varies by seed |
+| single idle heads (n = 31) | 0.03 | 0.40 | 0.44 | +0.02 (31/31 > 0) | 13% |
+| single previous-token heads (n = 9) | 1.33 | 0.48 | 2.60 | **+0.77** (9/9 > 0) | 16% |
+
+Saturation is real: removing the idle heads' constant cuts the margin by 3.3 of its 7.5
+nats yet costs only 0.21 nats of loss, so loss hides large internal effects. But the
+superadditivity is mostly *inside* the network: the margins themselves compound, and
+curvature would produce only about a fifth of the loss interaction if they didn't. The
+exception proves the pattern. In the two seeds where ablating the previous-token heads
+already destroys induction (about 6 nats), the margin interaction turns negative and the
+remaining loss interaction is curvature, just as for all of layer 0, where margins are
+strongly subadditive (−4.9). Where in the network the margins compound (the attention
+softmax, the copy readout, LayerNorm) is not localised further here.
 
 ### 2. LayerNorm cushions ablations; it amplifies only when the signal is gone
 
@@ -101,11 +126,29 @@ nats, median [IQR]):
 
 Freezing LayerNorm makes **95%** of single-head zero ablations, **100%** of mean ablations
 and **79%** of shift ablations worse. The original hypothesis (LayerNorm rescaling creates
-zero ablation's excess) is refuted. When one head goes, the residual stream's norm
-changes and LayerNorm rescales what remains, including the seven other induction heads
-doing the same job. That rescaling compensates, a form of self-repair; Rushing & Nanda
-(2024) attribute part of self-repair in real LMs to LayerNorm. Q3 will measure this
-directly.
+zero ablation's excess) is refuted. LayerNorm sees only the residual stream's direction,
+so any part of an ablation that merely grows or shrinks the residual is cancelled, and
+what remains (for an induction head, the seven others doing the same job) is rescaled to
+full strength. That compensation is a form of self-repair; Rushing & Nanda (2024)
+attribute part of self-repair in real LMs to LayerNorm. Q3 will measure this directly.
+
+**Which LayerNorm?** Freezing one at a time (ratio to live; single heads: median; groups:
+mean over seeds):
+
+| ablated | method | freeze layer-1 LayerNorm only | freeze final LayerNorm only | freeze both |
+|---|---|---|---|---|
+| single previous-token head (n = 9) | zero | **2.23** | 0.96 | 2.04 |
+| | mean | **4.06** | 1.00 | 4.07 |
+| single induction head (n = 26) | zero | 1.00 | **3.36** | 3.36 |
+| | mean | 1.00 | **3.40** | 3.40 |
+| single idle head (n = 31) | zero | 1.26 | 1.20 | 1.63 |
+| all induction heads | mean | 1.00 | **0.79** | 0.79 |
+| all of layer 0 | mean | 1.06 | **0.78** | 0.74 |
+
+The cushioning happens at the first LayerNorm downstream of the ablated head: layer 1's
+for layer-0 heads, the final one for layer-1 heads. (Freezing layer 1's LayerNorm cannot
+affect a layer-1 head's ablation, hence the exact 1.00s.) The amplification described
+next is the final LayerNorm's.
 
 The same rescaling **backfires when an ablation removes almost all the useful signal**.
 Ablating all induction heads at once shrinks the final residual to 0.30× its clean scale;
@@ -119,7 +162,8 @@ of clean scale. Zero ablation leaves them at 1.04× and 0.89×. LayerNorm theref
 amplifies the now-uninformative signal more under mean ablation. The model becomes more
 confident (output entropy 1.07 vs 1.75 nats) while equally wrong: answer-key attention is
 0.06 under both, against 0.88 clean. Freeze LayerNorm and the order flips in **5/5 seeds**:
-mean 4.93 vs zero 5.90 nats on average, against 6.66 vs 6.19 live.
+mean 4.93 vs zero 5.90 nats on average, against 6.66 vs 6.19 live. Freezing **only the
+final LayerNorm** is enough: mean 5.23 vs zero 5.83, again 5/5 seeds.
 
 ### 3. Where the damage travels
 
@@ -171,9 +215,11 @@ screening statistic, not a substitute for running the ablation.
 
 1. **Don't read zero − mean as "the cost of the off-distribution shift".** Run the shift
    ablation (r → r − μ) directly. It is one extra forward pass.
-2. **Expect ablation effects to be non-additive in saturated models.** Decompositions of
-   the form "X% due to A, Y% due to B" depend on order. Report both orders, or a Shapley
-   split, and say which.
+2. **Expect ablation effects to be non-additive.** Here the compounding is mostly inside
+   the network (in the logit margins), with saturated loss adding a little on top.
+   Decompositions of the form "X% due to A, Y% due to B" depend on order. Report both
+   orders, or a Shapley split, and say which. Checking interactions in margin space as
+   well as loss space shows how much the loss itself is responsible.
 3. **Freezing LayerNorm is not a neutral "cleaner" ablation.** It switches off a
    compensation mechanism: single-head effects grow 1.2–4×, while large group ablations
    shrink. State which you use.
@@ -183,12 +229,11 @@ screening statistic, not a substitute for running the ablation.
 ## Caveats
 
 * Same toy setting as Q1: 2-layer attention-only models on synthetic tasks, clean loss
-  about 0.001. The saturation that drives the interactions may be weaker in real LMs,
-  where losses are far from zero.
+  about 0.001. That saturation hides large margin effects from the loss; real LMs are far
+  less saturated, so loss-level effect sizes will differ. The margin-level interactions do
+  not depend on saturation, but have only been measured in this setting.
 * The Shapley split has only two players and is one convention among several; the raw
   2×2 numbers are in [`summary.md`](summary.md).
-* Frozen LayerNorm fixes *all* LayerNorm scales at once. Freezing only the final or only
-  the layer-1 LayerNorm would separate their roles.
 * In a 2-layer model, path effects are exact; in deeper models they measure direct paths
   only.
 * The idle heads' LayerNorm ratio under mean ablation rests on one head; mean ablation of
@@ -199,6 +244,9 @@ screening statistic, not a substitute for running the ablation.
 ```bash
 pip install -e '.[dev]'
 bash experiments/run_q2.sh 5     # needs the Q1 checkpoints in results/q1/models/
+for s in 0 1 2 3 4; do python experiments/q2_followup.py --seed $s; done   # LayerNorm split, margin test
+python experiments/q2_analyze.py results/q2
 ```
 
-About 9–14 minutes per seed with 2–4 threads, and about 2.7 GB of memory per seed.
+About 9–14 minutes per seed with 2–4 threads for the main run, 6–9 for the follow-up,
+and about 2.7 GB of memory per seed.
