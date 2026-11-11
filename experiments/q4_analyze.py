@@ -31,14 +31,29 @@ KIND_LABELS = {
 THRESHOLD = 0.01
 
 
-def load(d: Path) -> dict[int, list[dict]]:
+def usable(r: dict) -> tuple[bool, str]:
+    """A model is analysed only if it learned both tasks and has a complete reference circuit."""
+    if not r.get("training", {}).get("met_criterion", True):
+        return False, f"missed 99% accuracy after {r['training'].get('steps')} steps"
+    if not heads_of(r, "prev") or not heads_of(r, "ind"):
+        return False, "no complete reference circuit"
+    return True, ""
+
+
+def load(d: Path) -> tuple[dict[int, list[dict]], list[dict]]:
     runs: dict[int, list[dict]] = defaultdict(list)
+    excluded = []
     for p in sorted(d.glob("h*_seed*.json")):
         r = json.loads(p.read_text())
-        runs[r["heads"]].append(r)
+        ok, why = usable(r)
+        if ok:
+            runs[r["heads"]].append(r)
+        else:
+            excluded.append({"heads": r["heads"], "seed": r["seed"], "reason": why,
+                             "induction_acc": r["clean"]["induction"]["acc"]})
     if not runs:
-        sys.exit(f"no h*_seed*.json in {d}")
-    return dict(sorted(runs.items()))
+        sys.exit(f"no usable h*_seed*.json in {d}")
+    return dict(sorted(runs.items())), excluded
 
 
 def fmt(xs, d=2) -> str:
@@ -67,6 +82,7 @@ def summarize(runs: dict[int, list[dict]]) -> dict:
         o: dict = {"n_seeds": len(rs), "seeds": [r["seed"] for r in rs]}
         o["clean_induction_acc"] = [r["clean"]["induction"]["acc"] for r in rs]
         o["clean_two_back_acc"] = [r["clean"]["two_back"]["acc"] for r in rs]
+        o["train_steps"] = [r.get("training", {}).get("steps") for r in rs]
         o["n_prev"] = [len(heads_of(r, "prev")) for r in rs]
         o["n_ind"] = [len(heads_of(r, "ind")) for r in rs]
 
@@ -144,7 +160,7 @@ def summarize(runs: dict[int, list[dict]]) -> dict:
     return out
 
 
-def write_markdown(runs, s, path: Path) -> None:
+def write_markdown(runs, s, path: Path, excluded=()) -> None:
     L = [f"# Q4 summary\n",
          "Effects are increases in induction loss (nats) on the Q1 evaluation sets. Primary method: mean "
          "ablation. Interaction of a pair = effect(both) − effect(A) − effect(B); significant = 95% bootstrap CI "
@@ -152,11 +168,16 @@ def write_markdown(runs, s, path: Path) -> None:
          "inside the network). Explained = share of the loss interaction that loss curvature alone would "
          "produce if margin drops added.\n"]
     L.append("## Models\n")
-    L.append("| heads/layer | seeds | induction acc | two-back acc | prev-token heads | induction heads |")
-    L.append("|---|---|---|---|---|---|")
+    L.append("| heads/layer | seeds | training steps | induction acc | two-back acc | prev-token heads | induction heads |")
+    L.append("|---|---|---|---|---|---|---|")
     for H, o in s.items():
-        L.append(f"| {H} | {o['n_seeds']} | {fmt(o['clean_induction_acc'], 4)} | {fmt(o['clean_two_back_acc'], 4)} | "
+        L.append(f"| {H} | {o['n_seeds']} ({', '.join(map(str, o['seeds']))}) | {', '.join(map(str, o['train_steps']))} | "
+                 f"{fmt(o['clean_induction_acc'], 4)} | {fmt(o['clean_two_back_acc'], 4)} | "
                  f"{fmt(o['n_prev'], 1)} | {fmt(o['n_ind'], 1)} |")
+    if excluded:
+        L.append("\nExcluded models:\n")
+        for e in excluded:
+            L.append(f"* {e['heads']} heads/layer, seed {e['seed']}: {e['reason']} (induction accuracy {e['induction_acc']:.3f})")
     L.append("\n## 1. Does single-head ablation find the circuit heads?\n")
     L.append(f"Recall = fraction of circuit heads whose single-head effect exceeds {THRESHOLD:.0%} of the "
              "whole-circuit effect. Single ÷ group = one head's effect ÷ effect of ablating all heads of its kind "
@@ -275,10 +296,10 @@ def plot_pairs(s: dict, path: Path) -> None:
 
 def main() -> None:
     d = Path(sys.argv[1] if len(sys.argv) > 1 else "results/q4")
-    runs = load(d)
+    runs, excluded = load(d)
     s = summarize(runs)
-    (d / "summary.json").write_text(json.dumps({str(k): v for k, v in s.items()}, indent=1))
-    write_markdown(runs, s, d / "summary.md")
+    (d / "summary.json").write_text(json.dumps({"by_heads": {str(k): v for k, v in s.items()}, "excluded": excluded}, indent=1))
+    write_markdown(runs, s, d / "summary.md", excluded)
     plot_nested(s, d / "nested.png")
     plot_pairs(s, d / "pairs.png")
     print((d / "summary.md").read_text())

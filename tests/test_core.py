@@ -312,3 +312,16 @@ def test_interaction_test_is_exact_when_margins_add():
     assert abs(r["margin_interaction"]) < 1e-5
     assert abs(r["explained"] - 1) < 1e-4
     assert r["loss_interaction"] > 0  # softplus(-m) is convex: additive margin drops -> superadditive loss
+
+
+def test_train_to_criterion_matches_fixed_steps_when_met_at_min_steps():
+    from ablation.train import TrainConfig, train
+
+    cfg = Config(vocab_size=64, n_ctx=56, d_model=16, n_layers=1, n_heads=2, d_head=4, n_tasks=T.N_TAGS)
+    fixed, _ = train(cfg, T.Mixture(), TrainConfig(steps=6, seed=3, warmup=2), verbose=False)
+    calls = []
+    crit, log = train(cfg, T.Mixture(), TrainConfig(steps=50, seed=3, warmup=2), verbose=False,
+                      stop_fn=lambda m: calls.append(1) or True, min_steps=6, check_every=5)
+    assert len(calls) == 1 and max(e["step"] for e in log) == 5
+    for a, b in zip(fixed.parameters(), crit.parameters()):
+        assert torch.equal(a, b)

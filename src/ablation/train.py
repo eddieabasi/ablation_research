@@ -27,7 +27,17 @@ def train(
     task,
     train_cfg: TrainConfig,
     verbose: bool = True,
+    stop_fn=None,
+    min_steps: int = 0,
+    check_every: int = 250,
 ) -> tuple[Transformer, list[dict]]:
+    """Train from scratch for ``train_cfg.steps`` steps.
+
+    With ``stop_fn(model) -> bool``, training is checked every ``check_every`` steps once
+    ``min_steps`` have run, and stops as soon as ``stop_fn`` returns True ("train to
+    criterion"). Because the run is seeded, a model that meets the criterion at
+    ``min_steps`` is the same as one trained for exactly ``min_steps``.
+    """
     torch.manual_seed(train_cfg.seed)
     gen = torch.Generator().manual_seed(10_000 + train_cfg.seed)
     model = Transformer(model_cfg)
@@ -51,5 +61,13 @@ def train(
             log.append(entry)
             if verbose:
                 print(f"  seed={train_cfg.seed} step={step:5d} loss={loss.item():.4f}")
+        done = step + 1
+        if stop_fn is not None and done >= min_steps and (done - min_steps) % check_every == 0:
+            model.eval()
+            stop = stop_fn(model)
+            model.train()
+            log.append({"step": step, "check": bool(stop), "elapsed_s": round(time.time() - t0, 1)})
+            if stop:
+                break
     model.eval()
     return model, log

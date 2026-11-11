@@ -11,7 +11,11 @@ For one model (``--heads`` heads per layer, one seed):
   others of that kind
 
 Methods: mean ablation (primary) and resample ablation. 8-head models are the Q1
-checkpoints; other head counts are trained here with the same recipe.
+checkpoints; other head counts are trained here with the same recipe, *to criterion*:
+at least 1,500 steps (the Q1 budget), then until both tasks reach 99% held-out accuracy,
+up to ``--max-steps``. Small models sit on the induction plateau much longer than 8-head
+ones; with a fixed 1,500 steps most of them never learned induction at all. Models that
+miss the criterion are still analysed but flagged (``met_criterion``).
 
     python experiments/q4_redundancy.py --heads 4 --seed 0
 
@@ -40,17 +44,43 @@ METHODS = ("mean", "resample")
 MAX_SUBSETS = 10
 
 
-def get_model(heads: int, seed: int, q1: Path, out: Path, steps: int) -> tuple[Transformer, str]:
+CRITERION = 0.99
+
+
+@torch.no_grad()
+def task_accuracies(model: Transformer, n: int = 512) -> dict[str, float]:
+    """Held-out accuracy on each task (generator independent of training and evaluation data)."""
+    gen = torch.Generator().manual_seed(424242)
+    induction, two_back = T.Mixture().tasks
+    out = {}
+    for name, task in (("induction", induction), ("two_back", two_back)):
+        b = task.sample(n, gen)
+        out[name] = T.accuracy(model(b.tokens), b)
+    return out
+
+
+def meets_criterion(model: Transformer) -> bool:
+    return all(a >= CRITERION for a in task_accuracies(model).values())
+
+
+def get_model(heads: int, seed: int, q1: Path, out: Path, steps: int, max_steps: int) -> tuple[Transformer, dict]:
     if heads == 8 and (q1 / "models" / f"seed{seed}.pt").exists():
-        return Transformer.load(q1 / "models" / f"seed{seed}.pt"), "q1 checkpoint"
+        m = Transformer.load(q1 / "models" / f"seed{seed}.pt")
+        return m, {"source": "q1 checkpoint", "steps": steps, "met_criterion": meets_criterion(m)}
     path = out / "models" / f"h{heads}_seed{seed}.pt"
-    if path.exists():
-        return Transformer.load(path), "q4 checkpoint"
+    info_path = path.with_suffix(".json")
+    if path.exists() and info_path.exists():
+        return Transformer.load(path), json.loads(info_path.read_text())
     path.parent.mkdir(parents=True, exist_ok=True)
     cfg = Config(vocab_size=64, n_ctx=56, d_model=64, n_layers=2, n_heads=heads, d_head=16, n_tasks=T.N_TAGS)
-    model, _ = train(cfg, T.Mixture(), TrainConfig(steps=steps, seed=seed), verbose=False)
+    model, log = train(cfg, T.Mixture(), TrainConfig(steps=max_steps, seed=seed), verbose=False,
+                       stop_fn=meets_criterion, min_steps=steps, check_every=250)
+    trained = max(e["step"] for e in log) + 1
+    info = {"source": "trained to criterion", "steps": trained, "met_criterion": meets_criterion(model),
+            "accuracies": task_accuracies(model)}
     model.save(path)
-    return model, f"trained {steps} steps"
+    info_path.write_text(json.dumps(info, indent=1))
+    return model, info
 
 
 def pair_kind(a, b, circuit) -> str:
@@ -74,7 +104,8 @@ def main() -> None:
     ap.add_argument("--seed", type=int, required=True)
     ap.add_argument("--q1", type=Path, default=Path("results/q1"))
     ap.add_argument("--out", type=Path, default=Path("results/q4"))
-    ap.add_argument("--steps", type=int, default=1500)
+    ap.add_argument("--steps", type=int, default=1500, help="minimum training steps (Q1 budget)")
+    ap.add_argument("--max-steps", type=int, default=10000)
     ap.add_argument("--n-eval", type=int, default=2048)
     ap.add_argument("--n-ref", type=int, default=4096)
     ap.add_argument("--threads", type=int, default=4)
@@ -85,9 +116,9 @@ def main() -> None:
     args.out.mkdir(parents=True, exist_ok=True)
     tag = f"[h{args.heads} seed {args.seed}]"
 
-    model, source = get_model(args.heads, args.seed, args.q1, args.out, args.steps)
+    model, train_info = get_model(args.heads, args.seed, args.q1, args.out, args.steps, args.max_steps)
     model.eval()
-    print(f"{tag} model: {source} ({time.time() - t0:.0f}s)", flush=True)
+    print(f"{tag} model: {train_info} ({time.time() - t0:.0f}s)", flush=True)
 
     induction, two_back = T.Mixture().tasks
     g = lambda k: torch.Generator().manual_seed(1_000_000 * (k + 1) + args.seed)  # same streams as Q1
@@ -181,7 +212,7 @@ def main() -> None:
     out = {
         "heads": args.heads,
         "seed": args.seed,
-        "model_source": source,
+        "training": train_info,
         "config": model.cfg.to_dict(),
         "clean": clean,
         "clean_eval_loss": ctx.clean_loss.mean().item(),
