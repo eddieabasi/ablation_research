@@ -278,3 +278,37 @@ def test_layer1_head_direct_path_equals_full_ablation():
     full = ablation_effect(ctx, [(1, 2)], "mean")
     path = ablation_effect(ctx, [(1, 2)], "mean", receivers=["direct"])
     assert torch.allclose(full, path, atol=1e-5)
+
+
+# --- Q2 follow-up / Q4: margins, selective LayerNorm freezing, interaction test --------
+
+
+def test_loss_from_margins_matches_cross_entropy():
+    m = tiny_model()
+    b = T.InductionTask().sample(16, torch.Generator().manual_seed(0))
+    with torch.no_grad():
+        logits = m(b.tokens)
+    assert torch.allclose(T.loss_from_margins(T.margins(logits, b), b), T.per_seq_loss(logits, b), atol=1e-5)
+
+
+def test_selective_ln_freeze_sets():
+    from ablation.ablate import frozen_ln_hooks
+
+    m = tiny_model()
+    ctx = _ctx(m)
+    assert set(frozen_ln_hooks(ctx, "final")) == {"ln_final.scale"}
+    assert all(".ln1." in n for n in frozen_ln_hooks(ctx, "attn_inputs"))
+    assert set(frozen_ln_hooks(ctx, "final")) | set(frozen_ln_hooks(ctx, "attn_inputs")) == set(frozen_ln_hooks(ctx, "all"))
+
+
+def test_interaction_test_is_exact_when_margins_add():
+    from ablation.stats import interaction_test
+
+    g = torch.Generator().manual_seed(0)
+    m0 = 5 + torch.rand(8, 10, generator=g)
+    dA, dB = torch.rand(8, 10, generator=g), torch.rand(8, 10, generator=g)
+    mask = torch.ones(8, 10, dtype=torch.bool)
+    r = interaction_test(m0, m0 - dA, m0 - dB, m0 - dA - dB, mask)
+    assert abs(r["margin_interaction"]) < 1e-5
+    assert abs(r["explained"] - 1) < 1e-4
+    assert r["loss_interaction"] > 0  # softplus(-m) is convex: additive margin drops -> superadditive loss

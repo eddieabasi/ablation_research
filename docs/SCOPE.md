@@ -82,14 +82,24 @@ in the README.
 * **Hypothesis**: In models with redundant heads, single ablations are near zero for every
   circuit head while joint ablation is large, so single-head attribution has low recall.
   Interaction `effect(A ∪ B) − effect(A) − effect(B)` is strongly positive for backup pairs.
-* **Experiment**: pairwise joint ablations within the circuit; vary the number of heads to
-  control redundancy.
+* **Experiment** (as run, `experiments/q4_redundancy.py`): models with 2, 4 and 8 heads
+  per layer (5 seeds each; 8 = the Q1 models, the others trained with the same recipe).
+  For each: every single head, every pair of heads (interaction with bootstrap CI, plus
+  the margin test: does the interaction exist in the target-logit margin or only in the
+  loss?), nested ablation of k of the n induction heads, and sufficiency (keep one head of
+  a kind). Mean ablation (primary) and resample ablation. Prediction: backup pairs
+  (induction + induction) superadditive; serial pairs (previous-token + induction)
+  subadditive.
+* **Excluded**: 1 head per layer. With one head per layer the model learns two-back but
+  not induction (53% accuracy after 5,000 steps, no previous-token head), so there is no
+  reference circuit to test against.
 * **Leads from Q1**: no single induction head passes a 1%-of-circuit threshold under any
   method, in any seed, while the 8 together account for the whole effect.
 * **Leads from Q2**: ablation effects are superadditive near the clean model (removing a
   head's constant and its information together costs ~3× the sum for idle heads) and
   subadditive far from it. Q4's pairwise interactions should test whether this is a
-  general saturation effect.
+  general saturation effect. (The Q2 follow-up margin test already shows most of that
+  superadditivity is inside the network, not loss curvature.)
 
 ### Q5. How well does attribution patching (a linear approximation) predict real ablation effects?
 

@@ -19,7 +19,9 @@ The *effect* of an ablation is the per-sequence increase in task loss:
 
 Two variants (``ablation_effect`` keyword arguments):
 
-* ``freeze_ln=True``: every LayerNorm uses the scale it had in the clean run, so the
+* ``freeze_ln=True`` (or ``"all"``): every LayerNorm uses the scale it had in the clean
+  run; ``"final"`` freezes only the final LayerNorm, ``"attn_inputs"`` only the
+  LayerNorms in front of attention layers. Frozen, the
   ablation can change the residual stream's direction but cannot rescale it.
 * ``receivers=...``: path-specific ablation. The ablated heads' change in output is
   delivered only to the chosen receivers, everything else sees the clean value.
@@ -198,9 +200,23 @@ def path_hooks(
     return hooks
 
 
-def frozen_ln_hooks(ctx: AblationContext) -> Hooks:
-    """Replace every LayerNorm scale with its value in the clean run on ``ctx.eval_batch``."""
-    return {name: (lambda s, v=v: v[: s.shape[0]]) for name, v in ctx.clean_ln_scales.items()}
+LN_FREEZE_SETS = ("all", "final", "attn_inputs")
+
+
+def frozen_ln_hooks(ctx: AblationContext, which: str = "all") -> Hooks:
+    """Replace LayerNorm scales with their values in the clean run on ``ctx.eval_batch``.
+
+    ``which``: ``"all"``, ``"final"`` (only the final LayerNorm) or ``"attn_inputs"`` (only
+    the LayerNorms feeding attention layers).
+    """
+    keep = {
+        "all": lambda n: True,
+        "final": lambda n: n == "ln_final.scale",
+        "attn_inputs": lambda n: ".ln1." in n,
+    }
+    if which not in keep:
+        raise ValueError(f"which must be one of {LN_FREEZE_SETS}")
+    return {name: (lambda s, v=v: v[: s.shape[0]]) for name, v in ctx.clean_ln_scales.items() if keep[which](name)}
 
 
 def fit_optimal_constants(
@@ -240,7 +256,7 @@ def effect_hooks(
     heads: Iterable[Head],
     method: str,
     constants: dict[int, torch.Tensor] | None = None,
-    freeze_ln: bool = False,
+    freeze_ln: bool | str = False,
     receivers: Iterable[str] | None = None,
 ) -> Hooks:
     """All hooks for one ablation (see ``ablation_effect``)."""
@@ -253,7 +269,7 @@ def effect_hooks(
     else:
         hooks = path_hooks(ctx, heads, method, receivers, constants)
     if freeze_ln:
-        hooks.update(frozen_ln_hooks(ctx))
+        hooks.update(frozen_ln_hooks(ctx, "all" if freeze_ln is True else freeze_ln))
     return hooks
 
 
@@ -263,7 +279,7 @@ def ablation_effect(
     heads: Iterable[Head],
     method: str,
     constants: dict[int, torch.Tensor] | None = None,
-    freeze_ln: bool = False,
+    freeze_ln: bool | str = False,
     receivers: Iterable[str] | None = None,
 ) -> torch.Tensor:
     """Per-sequence loss increase on ``ctx.eval_batch`` from ablating ``heads`` jointly."""

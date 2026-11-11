@@ -39,6 +39,50 @@ def load(d: Path) -> list[dict]:
     return runs
 
 
+def load_followup(d: Path) -> list[dict]:
+    """Results of experiments/q2_followup.py (selective LayerNorm freezing, margin test)."""
+    return [json.loads(p.read_text()) for p in sorted(d.glob("followup_seed*.json"))]
+
+
+def summarize_followup(fu: list[dict]) -> dict:
+    out: dict = {"n_seeds": len(fu), "clean_margin_median": [r["clean_margin"]["median"] for r in fu]}
+    # LayerNorm split: frozen-X / live
+    ratios: dict = {}
+    for g in GROUPS:
+        ratios[g] = {}
+        for m in METHODS:
+            for which in ("final", "attn_inputs"):
+                vals = [r["units"][g][f"{m}_frozen_{which}"] / r["units"][g][m] for r in fu
+                        if g in r["units"] and r["units"][g][m] > 1e-3]
+                ratios[g][f"{m}_{which}"] = vals
+    single: dict = {k: {f"{m}_{w}": [] for m in METHODS for w in ("final", "attn_inputs")}
+                    for k in ("prev-token", "induction", "non-circuit")}
+    for r in fu:
+        for unit, u in r["units"].items():
+            k = kind(r, unit)
+            if not k:
+                continue
+            for m in METHODS:
+                if u[m] > 1e-3:
+                    for w in ("final", "attn_inputs"):
+                        single[k][f"{m}_{w}"].append(u[f"{m}_frozen_{w}"] / u[m])
+    out["ln_split_groups"] = ratios
+    out["ln_split_single"] = single
+    # margin test: A = mean, B = shift, AB = zero
+    keys = ("loss_interaction", "margin_drop_A", "margin_drop_B", "margin_drop_AB", "margin_interaction", "explained")
+    out["margin_groups"] = {g: {k: [r["units"][g]["margin_test"][k] for r in fu if g in r["units"]] for k in keys}
+                            for g in GROUPS}
+    ms: dict = {k: {kk: [] for kk in keys} for k in ("prev-token", "induction", "non-circuit")}
+    for r in fu:
+        for unit, u in r["units"].items():
+            k = kind(r, unit)
+            if k:
+                for kk in keys:
+                    ms[k][kk].append(u["margin_test"][kk])
+    out["margin_single"] = ms
+    return out
+
+
 def kind(run: dict, unit: str) -> str | None:
     if unit.startswith("group:"):
         return None
@@ -234,6 +278,36 @@ def write_markdown(runs: list[dict], s: dict, path: Path) -> None:
     for subset, d in s["predictors"].items():
         for y in ("shift", "zero_minus_mean"):
             L.append(f"| {subset} | {d['n']} | {y} | " + " | ".join(f"{d[f'{y}~{x}']:.2f}" for x in ("mean_norm", "q_read", "k_read", "v_read")) + " |")
+    fu = s.get("followup")
+    if fu:
+        L.append(f"\n## 6. Follow-up: which LayerNorm? ({fu['n_seeds']} seeds)\n")
+        L.append("Effect with only one LayerNorm frozen ÷ live effect (> 1: that LayerNorm was cushioning; "
+                 "< 1: it was amplifying). Only live effects above 0.001 nats. `attn` = the LayerNorms in "
+                 "front of attention (for layer-0 ablations, the layer-1 ones); `final` = the final LayerNorm.\n")
+        L.append("| unit | zero: attn | zero: final | mean: attn | mean: final | shift: attn | shift: final |")
+        L.append("|---|---|---|---|---|---|---|")
+        for g, lbl in GROUPS.items():
+            d = fu["ln_split_groups"][g]
+            L.append(f"| {lbl} (group) | " + " | ".join(fmt(d[f"{m}_{w}"]) for m in METHODS for w in ("attn_inputs", "final")) + " |")
+        for k, d in fu["ln_split_single"].items():
+            L.append(f"| {k} (single, median) | " + " | ".join(med(d[f"{m}_{w}"], 2, True) for m in METHODS for w in ("attn_inputs", "final")) + " |")
+        L.append(f"\n## 7. Follow-up: is the interaction just loss curvature? (margin test, {fu['n_seeds']} seeds)\n")
+        L.append(f"Margin m = target logit − logsumexp(other logits); loss = softplus(−m). Clean median margin "
+                 f"{fmt(fu['clean_margin_median'])} nats. A = mean ablation, B = shift, AB = zero. "
+                 "Margin interaction = drop(AB) − drop(A) − drop(B) (> 0: superadditive inside the network). "
+                 "Explained = share of the loss interaction that loss curvature alone would produce if margin "
+                 "drops added exactly.\n")
+        L.append("| unit | loss interaction | margin drop A (mean) | B (shift) | AB (zero) | margin interaction | explained by curvature |")
+        L.append("|---|---|---|---|---|---|---|")
+        for g, lbl in GROUPS.items():
+            d = fu["margin_groups"][g]
+            L.append(f"| {lbl} (group) | {fmt(d['loss_interaction'])} | {fmt(d['margin_drop_A'])} | {fmt(d['margin_drop_B'])} | "
+                     f"{fmt(d['margin_drop_AB'])} | {fmt(d['margin_interaction'])} | {fmt(d['explained'])} |")
+        for k, d in fu["margin_single"].items():
+            pos = np.mean(np.array(d["margin_interaction"]) > 0)
+            L.append(f"| {k} (single, median) | {med(d['loss_interaction'], 4)} | {med(d['margin_drop_A'], 2)} | "
+                     f"{med(d['margin_drop_B'], 2)} | {med(d['margin_drop_AB'], 2)} | {med(d['margin_interaction'], 2)} "
+                     f"({pos:.0%} > 0) | {med(d['explained'], 2)} |")
     path.write_text("\n".join(L) + "\n")
 
 
@@ -336,6 +410,9 @@ def main() -> None:
     d = Path(sys.argv[1] if len(sys.argv) > 1 else "results/q2")
     runs = load(d)
     s = summarize(runs)
+    fu = load_followup(d)
+    if fu:
+        s["followup"] = summarize_followup(fu)
     (d / "summary.json").write_text(json.dumps(s, indent=1))
     write_markdown(runs, s, d / "summary.md")
     plot_decomposition(s, d / "decomposition.png")

@@ -35,3 +35,36 @@ def top_k_overlap(a, b, k: int) -> float:
     ta = set(np.argsort(-np.asarray(a))[:k])
     tb = set(np.argsort(-np.asarray(b))[:k])
     return len(ta & tb) / k
+
+
+def interaction_test(m0, mA, mB, mAB, mask) -> dict:
+    """Is an interaction between two ablations A and B created by the loss curvature?
+
+    Inputs are per-position margins [batch, seq] (torch tensors) for clean (m0), A alone,
+    B alone, and both (mAB), plus the mask of scored positions. Returns:
+
+    * ``loss_*``: loss increases (nats) for A, B, AB and their interaction
+      ``loss_AB - loss_A - loss_B``
+    * ``margin_*``: mean margin *drops* and their interaction (positive = superadditive)
+    * ``pred_interaction``: the loss interaction implied if margin drops added exactly,
+      i.e. using margins mA + mB - m0 for AB. ``explained = pred / actual``.
+    """
+    import torch.nn.functional as F
+
+    w = mask.float()
+    per_seq = lambda x: ((x * w).sum(-1) / w.sum(-1)).mean()  # same weighting as tasks.per_seq_loss
+    L = lambda m: float(per_seq(F.softplus(-m)))
+    M = lambda m: float(per_seq(m0 - m))
+    l0 = L(m0)
+    la, lb, lab = L(mA) - l0, L(mB) - l0, L(mAB) - l0
+    lpred = L(mA + mB - m0) - l0
+    actual = lab - la - lb
+    pred = lpred - la - lb
+    ma, mb, mab = M(mA), M(mB), M(mAB)
+    return {
+        "loss_A": la, "loss_B": lb, "loss_AB": lab, "loss_interaction": actual,
+        "margin_drop_A": ma, "margin_drop_B": mb, "margin_drop_AB": mab,
+        "margin_interaction": mab - ma - mb,
+        "pred_interaction": pred,
+        "explained": pred / actual if abs(actual) > 1e-9 else float("nan"),
+    }

@@ -74,6 +74,26 @@ def per_seq_loss(logits: torch.Tensor, batch: Batch) -> torch.Tensor:
     return (nll * m).sum(-1) / m.sum(-1)
 
 
+def margins(logits: torch.Tensor, batch: Batch) -> torch.Tensor:
+    """Per-position margin m = z_target - logsumexp(other logits), [batch, seq].
+
+    Cross-entropy is exactly softplus(-m), a fixed convex function of the margin, so
+    comparing interactions in margin space vs loss space separates nonlinearity inside
+    the network from the curvature of the loss itself. Undefined (masked-out) positions
+    hold arbitrary values; use ``batch.mask``.
+    """
+    t = batch.targets.clamp(min=0).unsqueeze(-1)
+    z_t = logits.gather(-1, t).squeeze(-1)
+    others = logits.scatter(-1, t, float("-inf"))
+    return z_t - others.logsumexp(-1)
+
+
+def loss_from_margins(m: torch.Tensor, batch: Batch) -> torch.Tensor:
+    """Per-sequence loss from margins (equals ``per_seq_loss`` on the same logits)."""
+    mask = batch.mask.float()
+    return (torch.nn.functional.softplus(-m) * mask).sum(-1) / mask.sum(-1)
+
+
 def loss(logits: torch.Tensor, batch: Batch) -> torch.Tensor:
     return per_seq_loss(logits, batch).mean()
 
