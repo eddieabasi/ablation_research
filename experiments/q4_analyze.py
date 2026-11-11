@@ -76,6 +76,45 @@ def heads_of(r: dict, kind: str) -> list[str]:
     return [f"{l}.{h}" for l, h in r["reference_circuit"] if (l == 0) == (kind == "prev")]
 
 
+def hidden_backups(rs: list[dict]) -> list[dict]:
+    """For every non-circuit layer-0 head: its single effect, and its effect once its strongest
+    reference previous-token partner P is ablated (effect(head and P) - effect(P)), both relative to
+    the whole-circuit effect. A head is *hidden* if it misses the 1% threshold alone but passes it
+    once P is gone (and the interaction's CI excludes 0)."""
+    rows = []
+    for r in rs:
+        total = r["groups"]["circuit"]["mean"]["effect"]
+        prev = {tuple(map(int, h.split("."))) for h in heads_of(r, "prev")}
+        circ = {tuple(h) for h in r["reference_circuit"]}
+        by_head = defaultdict(list)
+        for p in r["pairs"]:
+            a, b = tuple(p["a"]), tuple(p["b"])
+            for x, y in ((a, b), (b, a)):
+                if x[0] == 0 and x not in circ and y in prev:
+                    by_head[x].append((y, p["mean"]))
+        for (l, h), partners in sorted(by_head.items()):
+            y, m = max(partners, key=lambda t: t[1]["interaction"])
+            single = r["single"][f"{l}.{h}"]["mean"]["effect"]
+            partner_single = r["single"][f"{y[0]}.{y[1]}"]["mean"]["effect"]
+            rows.append({
+                "seed": r["seed"], "head": f"{l}.{h}", "partner": f"{y[0]}.{y[1]}",
+                "prev_token_score": r["head_scores"]["prev_token"][l][h],
+                "bos_score": r["head_scores"]["bos"][l][h],
+                "single_rel": single / total,
+                "after_partner_rel": (m["effect_AB"] - partner_single) / total,
+                "interaction": m["interaction"], "interaction_lo": m["interaction_lo"],
+                "margin_interaction": m["margin_test"]["margin_interaction"],
+                "hidden": bool(single < THRESHOLD * total and m["effect_AB"] - partner_single > THRESHOLD * total
+                               and m["interaction_lo"] > 0),
+            })
+    return rows
+
+
+def _spearman(x, y) -> float:
+    rx, ry = np.argsort(np.argsort(x)), np.argsort(np.argsort(y))
+    return float(np.corrcoef(rx, ry)[0, 1]) if len(x) > 2 else float("nan")
+
+
 def summarize(runs: dict[int, list[dict]]) -> dict:
     out: dict = {}
     for H, rs in runs.items():
@@ -156,6 +195,9 @@ def summarize(runs: dict[int, list[dict]]) -> dict:
                     full = r["groups"][gname]["mean"]["effect"]
                     suff[kind] += [v / full for v in s.values()]
         o["sufficiency_keep_one_over_none"] = suff
+
+        # hidden backups: non-circuit layer-0 heads vs the reference previous-token heads (mean ablation)
+        o["hidden"] = hidden_backups(rs)
         out[H] = o
     return out
 
@@ -218,6 +260,29 @@ def write_markdown(runs, s, path: Path, excluded=()) -> None:
     for H, o in s.items():
         sf = o["sufficiency_keep_one_over_none"]
         L.append(f"| {H} | {fmt(sf['ind'])} (n={len(sf['ind'])}) | {fmt(sf['prev'])} (n={len(sf['prev'])}) |")
+    L.append("\n## 5. Hidden backups outside the reference circuit\n")
+    L.append("Non-circuit layer-0 heads (previous-token score below the 0.3 threshold). *Alone* = single-head effect; "
+             "*after P* = effect once the head's strongest reference previous-token partner P is already ablated "
+             "(effect(head and P) − effect(P)); both ÷ whole-circuit effect. Hidden = alone < 1%, after P > 1%, and the "
+             "pair interaction's CI excludes 0. ρ = Spearman between previous-token score and the interaction with P "
+             "(pooled over seeds; per-model median in brackets).\n")
+    L.append("| heads/layer | non-circuit layer-0 heads | pass 1% alone | pass 1% after P | hidden | hidden, score ≥ 0.1 | hidden, score < 0.1 | median after P ÷ alone | ρ(prev-token score, interaction) |")
+    L.append("|---|---|---|---|---|---|---|---|---|")
+    for H, o in s.items():
+        hb = o["hidden"]
+        if not hb:
+            continue
+        hid = [x for x in hb if x["hidden"]]
+        ratio = [x["after_partner_rel"] / max(x["single_rel"], 1e-6) for x in hb]
+        per_model = [_spearman([x["prev_token_score"] for x in hb if x["seed"] == sd],
+                               [x["interaction"] for x in hb if x["seed"] == sd]) for sd in o["seeds"]]
+        rho = _spearman([x["prev_token_score"] for x in hb], [x["interaction"] for x in hb])
+        hi_s = [x for x in hb if x["prev_token_score"] >= 0.1]
+        lo_s = [x for x in hb if x["prev_token_score"] < 0.1]
+        L.append(f"| {H} | {len(hb)} | {sum(x['single_rel'] > THRESHOLD for x in hb)} | "
+                 f"{sum(x['after_partner_rel'] > THRESHOLD for x in hb)} | {len(hid)} | "
+                 f"{sum(x['hidden'] for x in hi_s)}/{len(hi_s)} | {sum(x['hidden'] for x in lo_s)}/{len(lo_s)} | {med(ratio, 0)} | "
+                 f"{rho:.2f} ({med(per_model, 2)}) |")
     path.write_text("\n".join(L) + "\n")
 
 
@@ -294,6 +359,40 @@ def plot_pairs(s: dict, path: Path) -> None:
     plt.close(fig)
 
 
+def plot_hidden(s: dict, path: Path) -> None:
+    fig, ax = plt.subplots(figsize=(6.4, 4.2), dpi=200, facecolor=SURFACE)
+    _style(ax)
+    floor = 1e-5
+    for H, o in s.items():
+        hb = o["hidden"]
+        if not hb:
+            continue
+        x = np.array([r["prev_token_score"] for r in hb])
+        a = np.maximum([r["single_rel"] for r in hb], floor)
+        b = np.maximum([r["after_partner_rel"] for r in hb], floor)
+        ax.vlines(x, a, b, color=H_COLORS[H], linewidth=0.8, alpha=0.5, zorder=2)
+        ax.scatter(x, a, s=16, facecolor=SURFACE, edgecolor=H_COLORS[H], marker=H_MARKERS[H], linewidth=1, zorder=3)
+        ax.scatter(x, b, s=16, color=H_COLORS[H], marker=H_MARKERS[H], edgecolor=SURFACE, linewidth=0.4, zorder=3,
+                   label=f"{H} heads/layer")
+    ax.set_yscale("log")
+    ax.set_ylim(floor * 0.8, 1.5)
+    ax.axhline(THRESHOLD, color=INK2, linewidth=1, linestyle=(0, (4, 3)), zorder=1)
+    ax.text(0.186, THRESHOLD * 0.72, "1% of circuit effect", fontsize=7, color=INK2, va="top")
+    ax.axvline(0.3, color=INK2, linewidth=1, zorder=1)
+    ax.text(0.296, floor * 1.3, "reference-circuit\nthreshold", fontsize=7, color=INK2, ha="right", va="bottom")
+    ax.set_xlim(-0.01, 0.32)
+    ax.set_xlabel("previous-token attention score (non-circuit layer-0 heads)", fontsize=9, color=INK2)
+    ax.set_ylabel("effect ÷ whole-circuit effect", fontsize=9, color=INK2)
+    ax.set_title("Weak previous-token heads only matter once the main one is gone", fontsize=10, color=INK, loc="left")
+    leg = ax.legend(frameon=False, fontsize=8, loc="upper left")
+    plt.setp(leg.get_texts(), color=INK)
+    fig.text(0.01, 0.005, "Hollow = ablated alone; filled = after its strongest reference previous-token partner is ablated. "
+             f"Mean ablation; values < {floor:g} drawn at {floor:g}.", fontsize=6.5, color=INK2)
+    fig.tight_layout(rect=(0, 0.03, 1, 1))
+    fig.savefig(path, facecolor=SURFACE)
+    plt.close(fig)
+
+
 def main() -> None:
     d = Path(sys.argv[1] if len(sys.argv) > 1 else "results/q4")
     runs, excluded = load(d)
@@ -302,6 +401,7 @@ def main() -> None:
     write_markdown(runs, s, d / "summary.md", excluded)
     plot_nested(s, d / "nested.png")
     plot_pairs(s, d / "pairs.png")
+    plot_hidden(s, d / "hidden.png")
     print((d / "summary.md").read_text())
 
 
