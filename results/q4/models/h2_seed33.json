@@ -1,0 +1,9 @@
+{
+ "source": "trained to criterion",
+ "steps": 1500,
+ "met_criterion": false,
+ "accuracies": {
+  "induction": 0.17423035204410553,
+  "two_back": 0.9999262690544128
+ }
+}

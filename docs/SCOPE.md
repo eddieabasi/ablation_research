@@ -73,6 +73,12 @@ in the README.
   larger under mean than resample ablation.
 * **Leads from Q2**: freezing LayerNorm makes 95–100% of single-head ablations worse
   (1.2–4×), so LayerNorm rescaling is one compensation mechanism to quantify.
+* **Leads from Q4**: weak previous-token heads (attention score 0.1–0.3) do nothing while
+  the main previous-token head is intact, but matter once it is ablated (median 3.6%,
+  up to 37% of the circuit effect). That is a concrete case for Q3: is this backup a
+  fixed spare (the induction heads always read it, and it only becomes decisive), or
+  real compensation (the induction heads shift to it when the main signal disappears)?
+  Path patching the induction heads' keys with and without the main head would tell.
 * **Experiment**: compare total effect (ablate, let everything recompute) with direct
   effect (patch only the head→logits path). Needs ≥3 layers to have room for repair;
   also measure on the redundant 8-induction-head model.
@@ -83,23 +89,26 @@ in the README.
   circuit head while joint ablation is large, so single-head attribution has low recall.
   Interaction `effect(A ∪ B) − effect(A) − effect(B)` is strongly positive for backup pairs.
 * **Experiment** (as run, `experiments/q4_redundancy.py`): models with 2, 4 and 8 heads
-  per layer (5 seeds each; 8 = the Q1 models, the others trained with the same recipe).
-  For each: every single head, every pair of heads (interaction with bootstrap CI, plus
-  the margin test: does the interaction exist in the target-logit margin or only in the
-  loss?), nested ablation of k of the n induction heads, and sufficiency (keep one head of
-  a kind). Mean ablation (primary) and resample ablation. Prediction: backup pairs
-  (induction + induction) superadditive; serial pairs (previous-token + induction)
-  subadditive.
-* **Excluded**: 1 head per layer. With one head per layer the model learns two-back but
-  not induction (53% accuracy after 5,000 steps, no previous-token head), so there is no
-  reference circuit to test against.
+  per layer (8 = the Q1 models; 2 and 4 trained with the same recipe *to criterion*: at
+  least 1,500 steps, then until both tasks reach 99%, up to 10,000). For each: every single
+  head, every pair of heads (interaction with bootstrap CI, plus the margin test: does the
+  interaction exist in the target-logit margin or only in the loss?), nested ablation of k
+  of the n induction heads, and sufficiency (keep one head of a kind). Mean ablation
+  (primary) and resample ablation. Prediction: backup pairs (induction + induction)
+  superadditive; serial pairs (previous-token + induction) subadditive.
+* **Excluded**: 1 head per layer (learns two-back but not induction: 53% accuracy after
+  5,000 steps, no previous-token head), and any model that misses the criterion. Narrow
+  models often never leave the induction plateau: every model that met the criterion did
+  so by step 1,500, and none that missed it recovered by 10,000. So extra 2-head seeds
+  (5–34) were capped at 1,500 steps.
 * **Leads from Q1**: no single induction head passes a 1%-of-circuit threshold under any
   method, in any seed, while the 8 together account for the whole effect.
-* **Leads from Q2**: ablation effects are superadditive near the clean model (removing a
-  head's constant and its information together costs ~3× the sum for idle heads) and
-  subadditive far from it. Q4's pairwise interactions should test whether this is a
-  general saturation effect. (The Q2 follow-up margin test already shows most of that
-  superadditivity is inside the network, not loss curvature.)
+* **Leads from Q2**: ablation effects are superadditive near the clean model and
+  subadditive far from it; the Q2 margin test shows most of that superadditivity is inside
+  the network, not loss curvature.
+* **Result**: see [`results/q4/REPORT.md`](../results/q4/REPORT.md). Also found: *hidden
+  backups*, layer-0 heads under the 0.3 previous-token threshold that matter only once the
+  main previous-token head is ablated.
 
 ### Q5. How well does attribution patching (a linear approximation) predict real ablation effects?
 
@@ -108,6 +117,9 @@ in the README.
   (zero ablation, layer-0 heads that feed attention scores).
 * **Experiment**: gradient × (ablated − clean activation) vs measured effect, per head,
   per method.
+* **Leads from Q4**: a linear approximation is additive by construction, so it cannot see
+  the redundancy Q4 measured (8 induction heads that matter only jointly). Compare
+  attribution patching on single heads and on whole groups.
 
 ### Q6. How sensitive is resample ablation to the choice of corrupted distribution?
 

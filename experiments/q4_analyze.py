@@ -130,6 +130,7 @@ def summarize(runs: dict[int, list[dict]]) -> dict:
             rec = {"prev": [], "ind": []}
             frac_single = {"prev": [], "ind": []}
             sum_over_joint = {"prev": [], "ind": []}
+            second_order = {"prev": [], "ind": []}
             for r in rs:
                 total = r["groups"]["circuit"][method]["effect"]
                 for kind, gname in (("prev", "prev_token_heads"), ("ind", "induction_heads")):
@@ -141,9 +142,14 @@ def summarize(runs: dict[int, list[dict]]) -> dict:
                     joint = r["groups"][gname][method]["effect"]
                     frac_single[kind] += list(effs / joint)
                     sum_over_joint[kind].append(float(effs.sum() / joint))
+                    # second-order inclusion-exclusion: singles + every pairwise interaction within the kind
+                    kk = "prev-prev" if kind == "prev" else "ind-ind"
+                    inter = sum(p[method]["interaction"] for p in r["pairs"] if p["kind"] == kk)
+                    second_order[kind].append(float((effs.sum() + inter) / joint))
             o[f"{method}_recall"] = rec
             o[f"{method}_single_over_group"] = frac_single
             o[f"{method}_sum_singles_over_group"] = sum_over_joint
+            o[f"{method}_second_order_over_group"] = second_order
 
         # pair interactions by kind
         pk: dict = {}
@@ -164,6 +170,7 @@ def summarize(runs: dict[int, list[dict]]) -> dict:
                     "relative": (inter / np.maximum(ab, 1e-6)).tolist(),
                     "sig_pos": float(np.mean(lo > 0)),
                     "sig_neg": float(np.mean(hi < 0)),
+                    "margin_neg": float(np.mean([m["margin_interaction"] < 0 for m in mt])),
                     "margin_interaction": [m["margin_interaction"] for m in mt],
                     "explained": [m["explained"] for m in mt],
                     "effect_AB": ab.tolist(),
@@ -223,24 +230,27 @@ def write_markdown(runs, s, path: Path, excluded=()) -> None:
     L.append("\n## 1. Does single-head ablation find the circuit heads?\n")
     L.append(f"Recall = fraction of circuit heads whose single-head effect exceeds {THRESHOLD:.0%} of the "
              "whole-circuit effect. Single ÷ group = one head's effect ÷ effect of ablating all heads of its kind "
-             "(median over heads). Σ singles ÷ group = 1 if effects add up, ≪ 1 under redundancy.\n")
-    L.append("| heads/layer | method | recall: prev-token | recall: induction | single ÷ group: induction | Σ singles ÷ group: induction | Σ singles ÷ group: prev-token |")
-    L.append("|---|---|---|---|---|---|---|")
+             "(median over heads). Σ singles ÷ group = 1 if effects add up, ≪ 1 under redundancy. + pairs = the same "
+             "with every pairwise interaction within the group added (second-order inclusion–exclusion).\n")
+    L.append("| heads/layer | method | recall: prev-token | recall: induction | single ÷ group: induction | Σ singles ÷ group: induction | + pairs ÷ group: induction | Σ singles ÷ group: prev-token |")
+    L.append("|---|---|---|---|---|---|---|---|")
     for H, o in s.items():
         for m in ("mean", "resample"):
             L.append(f"| {H} | {m} | {fmt(o[f'{m}_recall']['prev'])} | {fmt(o[f'{m}_recall']['ind'])} | "
                      f"{med(o[f'{m}_single_over_group']['ind'], 3)} | {fmt(o[f'{m}_sum_singles_over_group']['ind'], 3)} | "
+                     f"{fmt(o[f'{m}_second_order_over_group']['ind'], 3)} | "
                      f"{fmt(o[f'{m}_sum_singles_over_group']['prev'], 3)} |")
     L.append("\n## 2. Pair interactions by pair type\n")
-    L.append("| heads/layer | method | pair type | n | median interaction | median relative (÷ effect of both) | sig. > 0 | sig. < 0 | median margin interaction | median explained by curvature |")
-    L.append("|---|---|---|---|---|---|---|---|---|---|")
+    L.append("| heads/layer | method | pair type | n | median interaction | median relative (÷ effect of both) | sig. > 0 | sig. < 0 | median margin interaction | margin < 0 | median explained by curvature |")
+    L.append("|---|---|---|---|---|---|---|---|---|---|---|")
     for H, o in s.items():
         for m in ("mean", "resample"):
             for kind in KINDS:
                 d = o["pairs"][m].get(kind)
                 if d:
                     L.append(f"| {H} | {m} | {kind} | {d['n']} | {med(d['interaction'], 4)} | {med(d['relative'], 2)} | "
-                             f"{d['sig_pos']:.0%} | {d['sig_neg']:.0%} | {med(d['margin_interaction'], 3)} | {med(d['explained'], 2)} |")
+                             f"{d['sig_pos']:.0%} | {d['sig_neg']:.0%} | {med(d['margin_interaction'], 3)} | {d['margin_neg']:.0%} | "
+                             f"{med(d['explained'], 2)} |")
     L.append("\n## 3. Nested ablation of induction heads (mean ablation)\n")
     L.append("Effect of removing k of n induction heads (mean over random subsets) ÷ effect of removing all n.\n")
     for H, o in s.items():
