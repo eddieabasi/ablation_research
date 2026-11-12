@@ -325,3 +325,60 @@ def test_train_to_criterion_matches_fixed_steps_when_met_at_min_steps():
     assert len(calls) == 1 and max(e["step"] for e in log) == 5
     for a, b in zip(fixed.parameters(), crit.parameters()):
         assert torch.equal(a, b)
+
+
+# --- decomposition (Q3) -------------------------------------------------------------
+
+
+def _ctx3(n=32, seed=0):
+    torch.manual_seed(seed)
+    m = Transformer(Config(vocab_size=64, n_ctx=56, d_model=32, n_layers=3, n_heads=4, d_head=8, n_tasks=T.N_TAGS))
+    m.eval()
+    task = T.InductionTask()
+    g = lambda k: torch.Generator().manual_seed(100 + k)
+    return AblationContext(m, task.sample(n, g(0)), task.sample(n, g(1)), task.sample(n, g(2)),
+                           lambda k: task.sample(k, g(3)))
+
+
+def test_decomposition_contributions_sum_to_clean_logit_diff():
+    from ablation.decompose import Decomposer
+    ctx = _ctx3()
+    d = Decomposer(ctx)
+    m = ctx.model
+    with torch.no_grad():
+        resid = m.embed(ctx.eval_batch.tokens) + m.pos_embed(torch.arange(ctx.eval_batch.tokens.shape[1]))
+        resid = resid + m.task_embed(ctx.eval_batch.tokens[:, :1])
+    emb = d.contributions({0: resid.unsqueeze(2)})[0][:, 0]
+    const = (m.ln_final.bias * d.u).sum(-1) + m.unembed.bias[ctx.eval_batch.targets.clamp(min=0)] - m.unembed.bias.mean()
+    from ablation.decompose import seq_mean
+    heads = sum(c.sum(-1) for c in d.c_clean.values())
+    assert torch.allclose(emb + heads + seq_mean(const, ctx.eval_batch), d.ld_clean, atol=1e-4)
+
+
+def test_decomposition_is_exact_with_final_ln_frozen():
+    from ablation.decompose import Decomposer
+    ctx = _ctx3()
+    d = Decomposer(ctx)
+    for method in ("zero", "mean", "resample"):
+        r = d([(0, 1)], method, freeze_ln="final")
+        assert r.ln_final.abs().max() < 1e-4
+        assert set(r.responses) == {(l, h) for l in (1, 2) for h in range(4)}
+        assert torch.allclose(r.total, r.direct + r.response_sum, atol=1e-4)
+
+
+def test_decomposition_unaffected_heads_do_not_change():
+    from ablation.decompose import Decomposer
+    ctx = _ctx3()
+    d = Decomposer(ctx)
+    assert d.unaffected_change([(1, 2)], "mean") < 1e-5
+    assert d.unaffected_change([(0, 0), (1, 3)], "zero") < 1e-5
+
+
+def test_decomposition_last_layer_head_has_no_responses():
+    from ablation.decompose import Decomposer
+    ctx = _ctx3()
+    d = Decomposer(ctx)
+    r = d([(2, 0)], "mean")
+    assert r.responses == {}
+    assert torch.allclose(r.total, r.direct + r.ln_final, atol=1e-6)
+    assert torch.allclose(r.loss, ablation_effect(ctx, [(2, 0)], "mean"), atol=1e-5)
